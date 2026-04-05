@@ -7,7 +7,7 @@ import {
   storyHref,
 } from './lib/hnBrief.js'
 import { buildStoryBrief } from './lib/storyBrief.js'
-import { feedLabel, fetchTopFiveStories } from './lib/topFeeds.js'
+import { feedLabel, fetchTopStories, STORY_TARGET_COUNT } from './lib/topFeeds.js'
 
 export default function App() {
   const [hits, setHits] = useState([])
@@ -18,7 +18,7 @@ export default function App() {
     setStatus('loading')
     setError(null)
     try {
-      const stories = await fetchTopFiveStories()
+      const stories = await fetchTopStories()
       setHits(stories)
       setStatus('ready')
     } catch (e) {
@@ -42,12 +42,12 @@ export default function App() {
     <div className="dtb-page">
       <header className="dtb-header">
         <p className="dtb-kicker">Hacker News</p>
-        <h1>Top 5 stories</h1>
+        <h1>Top {STORY_TARGET_COUNT} stories</h1>
         <p className="dtb-date">{todayLabel}</p>
         <p className="dtb-lede">
-          Five headlines pulled from the live web: Hacker News front page, Dev.to
-          top posts, and Lobsters when available—same list style, many publishers
-          behind the links.
+          {STORY_TARGET_COUNT} headlines from the live web: Hacker News front page,
+          Dev.to top posts, and Lobsters when available—many publishers behind the
+          links.
         </p>
         <div className="dtb-actions">
           <button
@@ -76,7 +76,7 @@ export default function App() {
 
         {status === 'loading' && hits.length === 0 && !error && (
           <ul className="dtb-stories dtb-skeleton" aria-hidden="true">
-            {Array.from({ length: 5 }, (_, i) => (
+            {Array.from({ length: 8 }, (_, i) => (
               <li key={i} className="dtb-story dtb-story-skel">
                 <span className="dtb-rank-skel" />
                 <div className="dtb-story-body">

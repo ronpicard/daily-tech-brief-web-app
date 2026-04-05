@@ -1,10 +1,13 @@
 const HN_URL =
-  'https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=10'
-const DEVTO_URL = 'https://dev.to/api/articles?per_page=8&top=7'
+  'https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=30'
+const DEVTO_URL = 'https://dev.to/api/articles?per_page=30&top=7'
 const LOBSTERS_URL =
   typeof import.meta !== 'undefined' && import.meta.env?.DEV
     ? '/api/lobsters-hottest'
     : 'https://lobste.rs/hottest.json'
+
+/** How many stories to show after merging feeds */
+export const STORY_TARGET_COUNT = 25
 
 function normalizeDevto(a) {
   return {
@@ -44,10 +47,12 @@ function tagHn(h) {
 }
 
 /**
- * Top 5 stories interleaved from Hacker News (Algolia), Dev.to, and Lobsters.
+ * Top N stories interleaved from Hacker News (Algolia), Dev.to, and Lobsters.
  * Falls back if a source fails (e.g. browser CORS).
  */
-export async function fetchTopFiveStories() {
+export async function fetchTopStories() {
+  const n = STORY_TARGET_COUNT
+
   const [hnR, devR, lobR] = await Promise.allSettled([
     fetch(HN_URL).then((r) => {
       if (!r.ok) throw new Error(String(r.status))
@@ -90,14 +95,15 @@ export async function fetchTopFiveStories() {
   const seen = new Set()
 
   const tryAdd = (s) => {
-    if (!s || picked.length >= 5) return
+    if (!s || picked.length >= n) return
     const key = (s.url || s.title || String(s.objectID)).toLowerCase().slice(0, 240)
     if (seen.has(key)) return
     seen.add(key)
     picked.push(s)
   }
 
-  for (let r = 0; r < 12 && picked.length < 5; r++) {
+  const rounds = Math.max(n * 2, 40)
+  for (let r = 0; r < rounds && picked.length < n; r++) {
     tryAdd(hnHits[r])
     tryAdd(devArticles[r])
     tryAdd(lobStories[r])
@@ -111,7 +117,7 @@ export async function fetchTopFiveStories() {
     throw new Error('No stories available')
   }
 
-  return picked.slice(0, 5)
+  return picked.slice(0, n)
 }
 
 export function feedLabel(feed) {
