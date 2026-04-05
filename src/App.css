@@ -31,9 +31,9 @@
   --mx-danger-border: rgba(244, 114, 182, 0.45);
   --mx-danger-bg: rgba(190, 24, 93, 0.15);
 
-  /* Fill viewport; wide column on desktop, comfortable gutters on mobile */
-  --content-max: min(96vw, 72rem);
-  --pad-x: clamp(0.65rem, 3.5vw, 2rem);
+  /* Nearly full width minus gutters; high cap so wide monitors aren’t stuck at ~72rem */
+  --pad-x: clamp(0.65rem, 3.5vw, 2.5rem);
+  --content-max: min(calc(100vw - 2 * var(--pad-x)), 140rem);
   --pad-y-top: clamp(1.25rem, 4vw, 2.75rem);
 
   flex: 1;
@@ -97,7 +97,7 @@
   font-size: clamp(0.8rem, 1.1vw + 0.72rem, 0.9rem);
   line-height: 1.65;
   color: var(--cy-blue-bright);
-  max-width: min(42rem, 100%);
+  max-width: min(56rem, 100%);
   margin-left: auto;
   margin-right: auto;
 }
