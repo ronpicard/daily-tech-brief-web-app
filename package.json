@@ -2,6 +2,7 @@
   "name": "daily-top-tech-brief",
   "private": true,
   "version": "0.0.0",
+  "license": "MIT",
   "type": "module",
   "homepage": "https://ronpicard.github.io/daily-tech-brief-web-app/",
   "scripts": {
