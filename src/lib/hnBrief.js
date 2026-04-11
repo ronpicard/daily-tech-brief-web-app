@@ -1,15 +1,26 @@
+/** Use https for outbound links when the source gave http:// */
+export function upgradeHttpToHttps(url) {
+  if (url == null || typeof url !== 'string') return url
+  const t = url.trim()
+  if (t.startsWith('http://')) return `https://${t.slice(7)}`
+  return t
+}
+
 export function storyHref(hit) {
-  if (hit.url) return hit.url
+  if (hit.url) return upgradeHttpToHttps(hit.url)
   if (hit.feed === 'devto' && hit.path) return `https://dev.to${hit.path}`
   return `https://news.ycombinator.com/item?id=${hit.objectID}`
 }
 
 export function commentsHref(hit) {
+  if ((hit.feed === 'gdelt' || hit.feed === 'rss') && hit.url) {
+    return upgradeHttpToHttps(hit.url)
+  }
   if (hit.feed === 'devto' && hit.path) {
     return `https://dev.to${hit.path}`
   }
   if (hit.feed === 'lobsters') {
-    if (hit.lobstersCommentsUrl) return hit.lobstersCommentsUrl
+    if (hit.lobstersCommentsUrl) return upgradeHttpToHttps(hit.lobstersCommentsUrl)
     if (hit.short_id) return `https://lobste.rs/s/${hit.short_id}`
   }
   return `https://news.ycombinator.com/item?id=${hit.objectID}`
