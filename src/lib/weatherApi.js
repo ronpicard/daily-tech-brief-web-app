@@ -5,6 +5,12 @@
 const OPEN_METEO = 'https://api.open-meteo.com/v1/forecast'
 const BIGDATA_REVERSE =
   'https://api.bigdatacloud.net/data/reverse-geocode-client'
+const FORECAST_CACHE_TTL_MS = 1000 * 60 * 10
+const forecastCache = new Map()
+
+function coordinateCacheKey(lat, lon) {
+  return `${Number(lat).toFixed(3)},${Number(lon).toFixed(3)}`
+}
 
 /** WMO Weather interpretation codes (Open-Meteo). */
 export function describeWeatherCode(code) {
@@ -109,6 +115,15 @@ export async function fetchCurrentWeather(lat, lon) {
  * @returns {Promise<{ timezone?: string, days: Array<{ date: string, code: number|null, high: number|null, low: number|null, precipProb: number|null, windMaxMph: number|null, sunrise: string, sunset: string }> }>}
  */
 export async function fetchDailyForecast10(lat, lon) {
+  const cacheKey = coordinateCacheKey(lat, lon)
+  const cached = forecastCache.get(cacheKey)
+  if (cached && Date.now() - cached.at < FORECAST_CACHE_TTL_MS) {
+    return {
+      timezone: cached.timezone,
+      days: cached.days.map((day) => ({ ...day })),
+    }
+  }
+
   const u = new URL(OPEN_METEO)
   u.searchParams.set('latitude', String(lat))
   u.searchParams.set('longitude', String(lon))
@@ -160,5 +175,7 @@ export async function fetchDailyForecast10(lat, lon) {
     uvMax: typeof uv[i] === 'number' ? uv[i] : null,
   }))
 
-  return { timezone: j?.timezone, days }
+  const result = { timezone: j?.timezone, days }
+  forecastCache.set(cacheKey, { at: Date.now(), ...result })
+  return result
 }

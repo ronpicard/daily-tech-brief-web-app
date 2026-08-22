@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   commentsHref,
@@ -27,7 +27,47 @@ import {
   fetchPlaceLabel,
   windCompassFromDegrees,
 } from './lib/weatherApi.js'
-import WeatherScreen from './WeatherScreen.jsx'
+const WeatherScreen = lazy(() => import('./WeatherScreen.jsx'))
+
+const CLOCK_FORMATTERS = {
+  et: new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: 'America/New_York',
+  }),
+  ct: new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: 'America/Chicago',
+  }),
+  mt: new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: 'America/Denver',
+  }),
+  pt: new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: 'America/Los_Angeles',
+  }),
+  utc: new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: 'UTC',
+  }),
+}
+
+const DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  weekday: 'long',
+  month: 'long',
+  day: 'numeric',
+  year: 'numeric',
+})
 
 const WEATHER_EMPTY = {
   status: 'idle',
@@ -44,12 +84,48 @@ const WEATHER_EMPTY = {
   pressureHpa: null,
 }
 
+function StatusClocks() {
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const date = new Date(now)
+  const times = Object.fromEntries(
+    Object.entries(CLOCK_FORMATTERS).map(([key, formatter]) => [
+      key,
+      formatter.format(date),
+    ]),
+  )
+
+  return (
+    <div className="dtb-topbar-left">
+      <div className="dtb-clocks" aria-label="US time zones and UTC">
+        {[
+          ['ET', times.et],
+          ['CT', times.ct],
+          ['MT', times.mt],
+          ['PT', times.pt],
+          ['UTC', times.utc],
+        ].map(([label, value]) => (
+          <span className="dtb-clock" key={label}>
+            <span className="dtb-clock-k">{label}</span>
+            <span className="dtb-clock-val">{value}</span>
+          </span>
+        ))}
+      </div>
+      <p className="dtb-date">{DATE_FORMATTER.format(date)}</p>
+    </div>
+  )
+}
+
 export default function App() {
   const loadGenRef = useRef(0)
   const [hits, setHits] = useState([])
   const [status, setStatus] = useState('loading')
   const [error, setError] = useState(null)
-  const [now, setNow] = useState(() => Date.now())
   const [weather, setWeather] = useState(() => ({ ...WEATHER_EMPTY }))
   const [weatherScreenOpen, setWeatherScreenOpen] = useState(false)
   const [activeTopic, setActiveTopic] = useState(() => {
@@ -108,11 +184,6 @@ export default function App() {
   }, [activeTopic])
 
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [])
-
-  useEffect(() => {
     let cancelled = false
 
     const loadWeather = async (lat, lon) => {
@@ -161,24 +232,6 @@ export default function App() {
     }
   }, [])
 
-  const tzTimes = useMemo(() => {
-    const d = new Date(now)
-    const fmt = (timeZone) =>
-      new Intl.DateTimeFormat(undefined, {
-        hour: 'numeric',
-        minute: '2-digit',
-        second: '2-digit',
-        timeZone,
-      }).format(d)
-    return {
-      et: fmt('America/New_York'),
-      ct: fmt('America/Chicago'),
-      mt: fmt('America/Denver'),
-      pt: fmt('America/Los_Angeles'),
-      utc: fmt('UTC'),
-    }
-  }, [now])
-
   const load = useCallback(async () => {
     const gen = ++loadGenRef.current
     setStatus('loading')
@@ -209,41 +262,26 @@ export default function App() {
     load()
   }, [load])
 
-  /** Warm caches for other tabs after the visible topic loads (sequential to respect GDELT throttle). */
-  useEffect(() => {
-    if (status !== 'ready' || hits.length === 0) return
-
-    let cancelled = false
-    const run = async () => {
-      const newsScope = resolveNewsScope(worldwide, selectedCountries)
-      const others = TOPIC_KEYS.filter((t) => t !== activeTopic)
-      for (const topic of others) {
-        if (cancelled) return
-        try {
-          await fetchTopStories({
-            topic,
-            limit: storyLimit,
-            newsScope,
-            newsSource,
-          })
-        } catch {
-          /* best-effort; tab will fetch on demand */
-        }
+  const prefetchTopic = useCallback(
+    (topic) => {
+      if (
+        newsSource !== NEWS_SOURCE_FEEDS ||
+        topic === activeTopic ||
+        !TOPIC_KEYS.includes(topic)
+      ) {
+        return
       }
-    }
-    void run()
-    return () => {
-      cancelled = true
-    }
-  }, [
-    status,
-    hits.length,
-    activeTopic,
-    storyLimit,
-    worldwide,
-    selectedCountries,
-    newsSource,
-  ])
+      void fetchTopStories({
+        topic,
+        limit: storyLimit,
+        newsScope: resolveNewsScope(worldwide, selectedCountries),
+        newsSource,
+      }).catch(() => {
+        /* Best effort; the normal tab load retains its error handling. */
+      })
+    },
+    [activeTopic, storyLimit, worldwide, selectedCountries, newsSource],
+  )
 
   useEffect(() => {
     try {
@@ -278,13 +316,6 @@ export default function App() {
     }
   }, [newsSource])
 
-  const todayLabel = new Intl.DateTimeFormat(undefined, {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  }).format(new Date())
-
   const wxWindComp =
     weather.windDirDeg != null ? windCompassFromDegrees(weather.windDirDeg) : ''
 
@@ -295,23 +326,33 @@ export default function App() {
     weather.lon != null
   ) {
     return (
-      <WeatherScreen
-        theme={activeTopic}
-        onClose={() => setWeatherScreenOpen(false)}
-        lat={weather.lat}
-        lon={weather.lon}
-        locationLabel={weather.locationLabel}
-        current={{
-          tempF: weather.tempF,
-          feelsLikeF: weather.feelsLikeF,
-          code: weather.code,
-          summary: weather.summary,
-          humidity: weather.humidity,
-          windMph: weather.windMph,
-          windDirDeg: weather.windDirDeg,
-          pressureHpa: weather.pressureHpa,
-        }}
-      />
+      <Suspense
+        fallback={
+          <div className="dtb-page dtb-weather-page" data-theme={activeTopic}>
+            <main className="dtb-weather-screen-main">
+              <p className="dtb-weather-screen-msg">Loading forecast…</p>
+            </main>
+          </div>
+        }
+      >
+        <WeatherScreen
+          theme={activeTopic}
+          onClose={() => setWeatherScreenOpen(false)}
+          lat={weather.lat}
+          lon={weather.lon}
+          locationLabel={weather.locationLabel}
+          current={{
+            tempF: weather.tempF,
+            feelsLikeF: weather.feelsLikeF,
+            code: weather.code,
+            summary: weather.summary,
+            humidity: weather.humidity,
+            windMph: weather.windMph,
+            windDirDeg: weather.windDirDeg,
+            pressureHpa: weather.pressureHpa,
+          }}
+        />
+      </Suspense>
     )
   }
 
@@ -319,31 +360,7 @@ export default function App() {
     <div className="dtb-page" data-theme={activeTopic}>
       <header className="dtb-header">
         <div className="dtb-topbar" aria-label="Status bar">
-          <div className="dtb-topbar-left">
-            <div className="dtb-clocks" aria-label="US time zones and UTC">
-              <span className="dtb-clock">
-                <span className="dtb-clock-k">ET</span>
-                <span className="dtb-clock-val">{tzTimes.et}</span>
-              </span>
-              <span className="dtb-clock">
-                <span className="dtb-clock-k">CT</span>
-                <span className="dtb-clock-val">{tzTimes.ct}</span>
-              </span>
-              <span className="dtb-clock">
-                <span className="dtb-clock-k">MT</span>
-                <span className="dtb-clock-val">{tzTimes.mt}</span>
-              </span>
-              <span className="dtb-clock">
-                <span className="dtb-clock-k">PT</span>
-                <span className="dtb-clock-val">{tzTimes.pt}</span>
-              </span>
-              <span className="dtb-clock">
-                <span className="dtb-clock-k">UTC</span>
-                <span className="dtb-clock-val">{tzTimes.utc}</span>
-              </span>
-            </div>
-            <p className="dtb-date">{todayLabel}</p>
-          </div>
+          <StatusClocks />
           <div className="dtb-topbar-end">
             <div className="dtb-top-actions">
               <button
@@ -542,6 +559,8 @@ export default function App() {
               key={t.key}
               type="button"
               className={`dtb-tab ${activeTopic === t.key ? 'is-active' : ''}`}
+              onMouseEnter={() => prefetchTopic(t.key)}
+              onFocus={() => prefetchTopic(t.key)}
               onClick={() => {
                 setHits([])
                 setStatus('loading')

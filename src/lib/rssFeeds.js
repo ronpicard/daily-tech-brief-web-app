@@ -29,7 +29,9 @@ function normalizeTopicKey(topic) {
 const ALLORIGINS =
   'https://api.allorigins.win/raw?url='
 
-const rssCache = new Map()
+const RSS_CACHE_TTL_MS = 1000 * 120
+const rssPoolCache = new Map()
+const rssPoolInFlight = new Map()
 
 /** Curated RSS/Atom URLs per topic (plus Google News search for breadth). */
 export const TOPIC_RSS_URLS = {
@@ -102,6 +104,18 @@ function parseNewsScopeFromOpts(opts) {
 }
 
 async function fetchFeedXml(url) {
+  const fetchViaAllOrigins = async () => {
+    const r = await fetch(`${ALLORIGINS}${encodeURIComponent(url)}`)
+    if (!r.ok) throw new Error(String(r.status))
+    return r.text()
+  }
+
+  // GitHub Pages cannot bypass feed CORS restrictions. Going through the
+  // production proxy immediately avoids a guaranteed failed round-trip.
+  if (import.meta.env.PROD) {
+    return fetchViaAllOrigins()
+  }
+
   const tryDirect = async () => {
     const r = await fetch(url, {
       mode: 'cors',
@@ -128,9 +142,7 @@ async function fetchFeedXml(url) {
     }
   }
 
-  const r = await fetch(`${ALLORIGINS}${encodeURIComponent(url)}`)
-  if (!r.ok) throw new Error(String(r.status))
-  return r.text()
+  return fetchViaAllOrigins()
 }
 
 function textContent(el) {
@@ -280,6 +292,48 @@ async function fetchOneFeed(url) {
   return parseFeedXml(xml, url)
 }
 
+async function loadTopicPool(topic, attachOutletBias) {
+  const cached = rssPoolCache.get(topic)
+  if (cached && Date.now() - cached.at < RSS_CACHE_TTL_MS) {
+    return cached.items
+  }
+
+  const existingRequest = rssPoolInFlight.get(topic)
+  if (existingRequest) return existingRequest
+
+  const request = (async () => {
+    const urls = topicFeedUrls(topic)
+    const results = await Promise.allSettled(urls.map((url) => fetchOneFeed(url)))
+    const allItems = []
+
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue
+      const { channelTitle, items } = result.value
+      for (const row of items) {
+        allItems.push(normalizeRssRow(row, channelTitle, attachOutletBias))
+      }
+    }
+
+    if (allItems.length === 0) {
+      throw new Error(
+        'Could not load RSS feeds (network or CORS). Try “GDELT search” in Settings, or use dev server with /api/rss proxy.',
+      )
+    }
+
+    rssPoolCache.set(topic, { at: Date.now(), items: allItems })
+    return allItems
+  })()
+
+  rssPoolInFlight.set(topic, request)
+  try {
+    return await request
+  } finally {
+    if (rssPoolInFlight.get(topic) === request) {
+      rssPoolInFlight.delete(topic)
+    }
+  }
+}
+
 /**
  * @param {object} opts - topic, limit, newsScope | newsCountries | newsRegion
  */
@@ -292,42 +346,15 @@ export async function fetchTopStoriesFromFeeds(opts = {}) {
   const attachOutletBias = topic === 'politics'
   const scope = parseNewsScopeFromOpts(opts)
 
-  const cacheKey = `rss|${topic}|${n}|${scope === NEWS_REGION_ALL ? 'all' : scope.join('+')}`
-  const cached = rssCache.get(cacheKey)
-  if (cached && Date.now() - cached.at < 1000 * 120) {
-    return cached.items.map((x) => ({ ...x }))
-  }
-
-  const urls = topicFeedUrls(topic)
-  const concurrency = 4
-  const chunks = []
-  for (let i = 0; i < urls.length; i += concurrency) {
-    chunks.push(urls.slice(i, i + concurrency))
-  }
-
-  const allItems = []
-  for (const batch of chunks) {
-    const results = await Promise.allSettled(batch.map((u) => fetchOneFeed(u)))
-    for (const r of results) {
-      if (r.status !== 'fulfilled') continue
-      const { channelTitle, items } = r.value
-      for (const row of items) {
-        allItems.push(normalizeRssRow(row, channelTitle, attachOutletBias))
-      }
-    }
-  }
-
-  if (allItems.length === 0) {
-    throw new Error(
-      'Could not load RSS feeds (network or CORS). Try “GDELT search” in Settings, or use dev server with /api/rss proxy.',
-    )
-  }
-
-  const picked = applyCountryPreference(allItems, scope, n)
+  const allItems = await loadTopicPool(topic, attachOutletBias)
+  const picked = applyCountryPreference(
+    allItems.map((item) => ({ ...item })),
+    scope,
+    n,
+  )
   if (picked.length === 0) {
     throw new Error('No stories matched after combining feeds.')
   }
 
-  rssCache.set(cacheKey, { at: Date.now(), items: picked.map((x) => ({ ...x })) })
   return picked
 }

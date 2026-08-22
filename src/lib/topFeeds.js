@@ -20,6 +20,7 @@ export const DEFAULT_STORY_COUNT = 5
 const GDELT_MIN_INTERVAL_MS = 3000
 let lastGdeltFetchAt = 0
 const gdeltCache = new Map()
+const topStoriesInFlight = new Map()
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -372,10 +373,34 @@ function normalizeGdeltArticle(a, idx, attachOutletBias) {
 export async function fetchTopStories(opts = {}) {
   const source =
     opts.newsSource === NEWS_SOURCE_GDELT ? NEWS_SOURCE_GDELT : NEWS_SOURCE_FEEDS
-  if (source === NEWS_SOURCE_FEEDS) {
-    return fetchTopStoriesFromFeeds(opts)
+  const scope = parseNewsScopeFromOpts(opts)
+  const requestKey = JSON.stringify([
+    source,
+    normalizeTopicKey(opts.topic),
+    opts.limit ?? DEFAULT_STORY_COUNT,
+    scope,
+  ])
+
+  const existingRequest = topStoriesInFlight.get(requestKey)
+  if (existingRequest) {
+    const stories = await existingRequest
+    return stories.map((story) => ({ ...story }))
   }
-  return fetchTopStoriesFromGdelt(opts)
+
+  const request =
+    source === NEWS_SOURCE_FEEDS
+      ? fetchTopStoriesFromFeeds(opts)
+      : fetchTopStoriesFromGdelt(opts)
+  topStoriesInFlight.set(requestKey, request)
+
+  try {
+    const stories = await request
+    return stories.map((story) => ({ ...story }))
+  } finally {
+    if (topStoriesInFlight.get(requestKey) === request) {
+      topStoriesInFlight.delete(requestKey)
+    }
+  }
 }
 
 async function fetchTopStoriesFromGdelt(opts = {}) {

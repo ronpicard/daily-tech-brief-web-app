@@ -7,6 +7,9 @@ const MYMEMORY_PATH = import.meta.env.DEV
   ? '/api/mymemory/get'
   : 'https://api.mymemory.translated.net/get'
 
+const translationCache = new Map()
+const translationRequests = new Map()
+
 /** Map GDELT / common full names to ISO 639-1 for MyMemory langpair */
 const LANG_NAME_TO_CODE = {
   english: 'en',
@@ -107,18 +110,37 @@ function looksProbablyNotEnglishLatinScript(title) {
 async function translateWithMyMemoryLangpair(text, langpair) {
   const q = String(text).slice(0, 480)
   if (!q.trim()) return null
-  const params = new URLSearchParams({ q, langpair })
-  const url = `${MYMEMORY_PATH}?${params.toString()}`
-  const r = await fetch(url)
-  if (!r.ok) return null
-  const j = await r.json()
-  const out = j?.responseData?.translatedText
-  const status = j?.responseStatus
-  if (status && Number(status) === 403) return null
-  if (typeof out !== 'string' || !out.trim()) return null
-  const trimmed = out.trim()
-  if (trimmed.toLowerCase() === q.trim().toLowerCase()) return null
-  return trimmed
+  const cacheKey = `${langpair}|${q.trim().toLowerCase()}`
+  const cached = translationCache.get(cacheKey)
+  if (cached) return cached
+
+  const existingRequest = translationRequests.get(cacheKey)
+  if (existingRequest) return existingRequest
+
+  const request = (async () => {
+    const params = new URLSearchParams({ q, langpair })
+    const url = `${MYMEMORY_PATH}?${params.toString()}`
+    const r = await fetch(url)
+    if (!r.ok) return null
+    const j = await r.json()
+    const out = j?.responseData?.translatedText
+    const status = j?.responseStatus
+    if (status && Number(status) === 403) return null
+    if (typeof out !== 'string' || !out.trim()) return null
+    const trimmed = out.trim()
+    if (trimmed.toLowerCase() === q.trim().toLowerCase()) return null
+    translationCache.set(cacheKey, trimmed)
+    return trimmed
+  })()
+
+  translationRequests.set(cacheKey, request)
+  try {
+    return await request
+  } finally {
+    if (translationRequests.get(cacheKey) === request) {
+      translationRequests.delete(cacheKey)
+    }
+  }
 }
 
 /**
