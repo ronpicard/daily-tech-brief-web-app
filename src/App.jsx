@@ -562,7 +562,6 @@ export default function App() {
               onMouseEnter={() => prefetchTopic(t.key)}
               onFocus={() => prefetchTopic(t.key)}
               onClick={() => {
-                setHits([])
                 setStatus('loading')
                 setError(null)
                 setActiveTopic(t.key)

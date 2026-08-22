@@ -26,12 +26,100 @@ function normalizeTopicKey(topic) {
   return TOPIC_KEY_SET.has(topic) ? topic : 'tech'
 }
 
-const ALLORIGINS =
-  'https://api.allorigins.win/raw?url='
-
+const ALLORIGINS = 'https://api.allorigins.win/raw?url='
+const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url='
+const FEED_TIMEOUT_MS = 7000
 const RSS_CACHE_TTL_MS = 1000 * 120
 const rssPoolCache = new Map()
 const rssPoolInFlight = new Map()
+
+function abortableTimeout(ms) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ms)
+  return {
+    signal: controller.signal,
+    clear() {
+      clearTimeout(timer)
+    },
+  }
+}
+
+async function fetchText(url, signal, init = {}) {
+  const r = await fetch(url, { ...init, signal })
+  if (!r.ok) throw new Error(String(r.status))
+  return r.text()
+}
+
+async function fetchViaRss2Json(feedUrl, signal) {
+  const r = await fetch(`${RSS2JSON}${encodeURIComponent(feedUrl)}`, { signal })
+  if (!r.ok) throw new Error(String(r.status))
+  const j = await r.json()
+  if (j?.status !== 'ok' || !Array.isArray(j.items)) {
+    throw new Error(j?.message || 'rss2json failed')
+  }
+  return {
+    channelTitle: j.feed?.title || '',
+    items: j.items
+      .map((item) => ({
+        title: item.title || 'Untitled',
+        link: item.link || item.url || '',
+        pubDate: item.pubDate || item.pubdate || '',
+        author: item.author || '',
+      }))
+      .filter((row) => row.link),
+    feedUrl,
+  }
+}
+
+async function fetchFeedXml(url, signal) {
+  const fetchViaAllOrigins = () =>
+    fetchText(`${ALLORIGINS}${encodeURIComponent(url)}`, signal)
+
+  // Prefer the local Vite proxy in development (fast + no third-party quota).
+  if (import.meta.env.DEV) {
+    try {
+      const text = await fetchText(`/api/rss?u=${encodeURIComponent(url)}`, signal)
+      return text
+    } catch {
+      // fall through
+    }
+  }
+
+  try {
+    return await fetchText(url, signal, {
+      mode: 'cors',
+      headers: {
+        Accept:
+          'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
+      },
+    })
+  } catch {
+    // Production browsers usually fail CORS here.
+  }
+
+  return fetchViaAllOrigins()
+}
+
+async function fetchOneFeed(url) {
+  try {
+    const timeout = abortableTimeout(FEED_TIMEOUT_MS)
+    try {
+      return await fetchViaRss2Json(url, timeout.signal)
+    } finally {
+      timeout.clear()
+    }
+  } catch {
+    // Prefer rss2json; fall back to XML / AllOrigins if it fails or rate-limits.
+  }
+
+  const timeout = abortableTimeout(FEED_TIMEOUT_MS)
+  try {
+    const xml = await fetchFeedXml(url, timeout.signal)
+    return parseFeedXml(xml, url)
+  } finally {
+    timeout.clear()
+  }
+}
 
 /** Curated RSS/Atom URLs per topic (plus Google News search for breadth). */
 export const TOPIC_RSS_URLS = {
@@ -101,48 +189,6 @@ function parseNewsScopeFromOpts(opts) {
     return normalizeCountrySelection([u])
   }
   return [DEFAULT_NEWS_REGION]
-}
-
-async function fetchFeedXml(url) {
-  const fetchViaAllOrigins = async () => {
-    const r = await fetch(`${ALLORIGINS}${encodeURIComponent(url)}`)
-    if (!r.ok) throw new Error(String(r.status))
-    return r.text()
-  }
-
-  // GitHub Pages cannot bypass feed CORS restrictions. Going through the
-  // production proxy immediately avoids a guaranteed failed round-trip.
-  if (import.meta.env.PROD) {
-    return fetchViaAllOrigins()
-  }
-
-  const tryDirect = async () => {
-    const r = await fetch(url, {
-      mode: 'cors',
-      headers: { Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*' },
-    })
-    if (!r.ok) throw new Error(String(r.status))
-    return r.text()
-  }
-
-  try {
-    return await tryDirect()
-  } catch {
-    // ignore
-  }
-
-  if (import.meta.env.DEV) {
-    try {
-      const proxy = `/api/rss?u=${encodeURIComponent(url)}`
-      const r = await fetch(proxy)
-      if (!r.ok) throw new Error(String(r.status))
-      return r.text()
-    } catch {
-      // ignore
-    }
-  }
-
-  return fetchViaAllOrigins()
 }
 
 function textContent(el) {
@@ -287,49 +333,91 @@ function applyCountryPreference(pool, scope, n) {
   return dedupePick([...inR, ...outR], n)
 }
 
-async function fetchOneFeed(url) {
-  const xml = await fetchFeedXml(url)
-  return parseFeedXml(xml, url)
-}
-
-async function loadTopicPool(topic, attachOutletBias) {
+/**
+ * Fetch topic feeds in parallel and return as soon as we can fill `limit`.
+ * Remaining feeds keep running in the background to warm the cache.
+ */
+async function loadTopicStories(topic, attachOutletBias, scope, limit) {
   const cached = rssPoolCache.get(topic)
   if (cached && Date.now() - cached.at < RSS_CACHE_TTL_MS) {
-    return cached.items
+    return applyCountryPreference(
+      cached.items.map((item) => ({ ...item })),
+      scope,
+      limit,
+    )
   }
 
-  const existingRequest = rssPoolInFlight.get(topic)
+  const cacheKey = `${topic}|${limit}|${scope === NEWS_REGION_ALL ? 'all' : scope.join('+')}`
+  const existingRequest = rssPoolInFlight.get(cacheKey)
   if (existingRequest) return existingRequest
 
   const request = (async () => {
     const urls = topicFeedUrls(topic)
-    const results = await Promise.allSettled(urls.map((url) => fetchOneFeed(url)))
-    const allItems = []
+    const pool = []
+    let settled = false
+    let resolveReady
+    const ready = new Promise((resolve) => {
+      resolveReady = resolve
+    })
 
-    for (const result of results) {
-      if (result.status !== 'fulfilled') continue
-      const { channelTitle, items } = result.value
-      for (const row of items) {
-        allItems.push(normalizeRssRow(row, channelTitle, attachOutletBias))
-      }
+    const finish = (picked) => {
+      if (settled) return
+      settled = true
+      resolveReady(picked)
     }
 
-    if (allItems.length === 0) {
+    const consider = () => {
+      if (settled) return
+      const picked = applyCountryPreference(
+        pool.map((item) => ({ ...item })),
+        scope,
+        limit,
+      )
+      if (picked.length >= limit) finish(picked)
+    }
+
+    const tasks = urls.map(async (url) => {
+      try {
+        const { channelTitle, items } = await fetchOneFeed(url)
+        for (const row of items) {
+          pool.push(normalizeRssRow(row, channelTitle, attachOutletBias))
+        }
+        consider()
+      } catch {
+        // Slow or dead feeds are skipped; others can still fill the list.
+      }
+    })
+
+    void Promise.allSettled(tasks).then(() => {
+      if (pool.length > 0) {
+        rssPoolCache.set(topic, { at: Date.now(), items: pool.slice() })
+      }
+      if (!settled) {
+        finish(
+          applyCountryPreference(
+            pool.map((item) => ({ ...item })),
+            scope,
+            limit,
+          ),
+        )
+      }
+    })
+
+    const picked = await ready
+    if (!picked || picked.length === 0) {
       throw new Error(
         'Could not load RSS feeds (network or CORS). Try “GDELT search” in Settings, or use dev server with /api/rss proxy.',
       )
     }
-
-    rssPoolCache.set(topic, { at: Date.now(), items: allItems })
-    return allItems
+    return picked
   })()
 
-  rssPoolInFlight.set(topic, request)
+  rssPoolInFlight.set(cacheKey, request)
   try {
     return await request
   } finally {
-    if (rssPoolInFlight.get(topic) === request) {
-      rssPoolInFlight.delete(topic)
+    if (rssPoolInFlight.get(cacheKey) === request) {
+      rssPoolInFlight.delete(cacheKey)
     }
   }
 }
@@ -346,12 +434,7 @@ export async function fetchTopStoriesFromFeeds(opts = {}) {
   const attachOutletBias = topic === 'politics'
   const scope = parseNewsScopeFromOpts(opts)
 
-  const allItems = await loadTopicPool(topic, attachOutletBias)
-  const picked = applyCountryPreference(
-    allItems.map((item) => ({ ...item })),
-    scope,
-    n,
-  )
+  const picked = await loadTopicStories(topic, attachOutletBias, scope, n)
   if (picked.length === 0) {
     throw new Error('No stories matched after combining feeds.')
   }
