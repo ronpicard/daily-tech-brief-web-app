@@ -49,6 +49,10 @@ export default defineConfig(({ command }) => ({
     process.env.VITE_BASE_PATH ??
     (command === 'build' ? `/${repoName}/` : '/'),
   plugins: [react(), rssProxyPlugin()],
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.js'],
+  },
   server: {
     proxy: {
       // Lobsters often blocks browser CORS; use in dev only.
